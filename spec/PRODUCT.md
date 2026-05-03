@@ -10,7 +10,7 @@ The dashboard monitors:
 - Sonarr
 - Radarr
 - SABnzbd
-- Overseerr
+- Seerr
 
 The product should favor clear operational visibility over decorative animation. The target user is technical enough to configure local services and API keys, but should not need to maintain a complex custom-rendered terminal application.
 
@@ -25,7 +25,7 @@ The product should favor clear operational visibility over decorative animation.
 
 ## Non-Goals
 
-- This is not a full replacement for Plex, Sonarr, Radarr, SABnzbd, or Overseerr web UIs.
+- This is not a full replacement for Plex, Sonarr, Radarr, SABnzbd, or Seerr web UIs.
 - The MVP will not edit queues, approve requests, delete downloads, or mutate server state.
 - The MVP will not support tiny terminal layouts.
 - The MVP will not prioritize animations, mouse-first interaction, or theme customization.
@@ -86,7 +86,7 @@ Examples:
 - Sonarr: queue count, grabbed count, RSS count
 - Radarr: queue count, grabbed count, RSS count
 - SABnzbd: queue count, speed, queue size
-- Overseerr: total requests, pending requests, issue count
+- Seerr: total requests, pending requests, issue count
 
 ### Top Row
 
@@ -118,7 +118,7 @@ Plex stream/transcode data must be sanitized before rendering so incomplete or i
 
 `Upcoming Releases` should show Sonarr/Radarr calendar data.
 
-`Pending Requests` should show Overseerr requests.
+`Pending Requests` should show Seerr requests.
 
 `Queue Summary` should aggregate queue counts and status across services.
 
@@ -236,10 +236,10 @@ enabled = true
 url = "http://sabnzbd.local:8080"
 api_key_env = "CDASHBOARD_SABNZBD_API_KEY"
 
-[overseerr]
+[Seerr]
 enabled = true
-url = "http://overseerr.local:5055"
-api_key_env = "CDASHBOARD_OVERSEERR_API_KEY"
+url = "http://Seerr.local:5055"
+api_key_env = "CDASHBOARD_Seerr_API_KEY"
 ```
 
 ## Keybinds
@@ -266,7 +266,7 @@ The smallest useful first version includes:
 - Plex recently added
 - SABnzbd queue summary and active downloads
 - Sonarr/Radarr calendar and queue summaries
-- Overseerr pending requests
+- Seerr pending requests
 - Concurrent polling with timeouts
 - Per-service error and stale states
 - Last known good data preservation
@@ -316,4 +316,4 @@ Defer until the dashboard is stable:
 - Which Plex account/user naming convention should be displayed when multiple names are available?
 - Should local and remote Plex streams be grouped or only tagged by location?
 - Which queue states from Sonarr/Radarr/SABnzbd deserve warning colors?
-- Should Overseerr approved-but-not-fulfilled requests appear in `Pending Requests` or a future separate panel?
+- Should Seerr approved-but-not-fulfilled requests appear in `Pending Requests` or a future separate panel?
