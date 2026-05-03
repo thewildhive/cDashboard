@@ -78,7 +78,7 @@ cDashboard/
       client.go
       models.go
       sanitize.go
-    overseerr/
+    Seerr/
       client.go
       models.go
       sanitize.go
@@ -93,7 +93,7 @@ cDashboard/
     sonarr.go
     radarr.go
     sabnzbd.go
-    overseerr.go
+    Seerr.go
   internal/model/
     dashboard.go
     downloads.go
@@ -158,7 +158,7 @@ type DashboardState struct {
     Sonarr          ArrState
     Radarr          ArrState
     SABnzbd         SABState
-    Overseerr       OverseerrState
+    Seerr       SeerrState
     LastUpdated     time.Time
     RefreshInterval time.Duration
 }
@@ -260,7 +260,7 @@ func (d *Dashboard) ApplySnapshot(snapshot model.DashboardState) {
         d.renderStreams(snapshot.Plex)
         d.renderDownloads(snapshot.SABnzbd)
         d.renderUpcoming(snapshot.Sonarr, snapshot.Radarr)
-        d.renderRequests(snapshot.Overseerr)
+        d.renderRequests(snapshot.Seerr)
         d.renderQueue(snapshot)
         d.renderFooter(snapshot)
     })
@@ -397,7 +397,7 @@ type Config struct {
     Sonarr          APIConfig     `toml:"sonarr"`
     Radarr          APIConfig     `toml:"radarr"`
     SABnzbd         APIConfig     `toml:"sabnzbd"`
-    Overseerr       APIConfig     `toml:"overseerr"`
+    Seerr       APIConfig     `toml:"Seerr"`
 }
 
 type APIConfig struct {
@@ -528,7 +528,7 @@ Sonarr and Radarr should normalize queue and calendar entries into shared app mo
 
 SABnzbd should normalize download queue entries into one stable download model.
 
-Overseerr should normalize requests into one stable request model.
+Seerr should normalize requests into one stable request model.
 
 Do not expose API-specific status strings directly to color/style logic. Map them to semantic statuses first.
 
