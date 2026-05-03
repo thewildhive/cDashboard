@@ -49,7 +49,7 @@ cDashboard/
       client.go
       models.go
       sanitize.go
-    overseerr/
+    Seerr/
       client.go
       models.go
       sanitize.go
@@ -64,7 +64,7 @@ cDashboard/
     sonarr.go
     radarr.go
     sabnzbd.go
-    overseerr.go
+    Seerr.go
   internal/model/
     dashboard.go
     downloads.go
@@ -143,7 +143,7 @@ type DashboardState struct {
     Sonarr          ArrState
     Radarr          ArrState
     SABnzbd         SABState
-    Overseerr       OverseerrState
+    Seerr       SeerrState
     LastUpdated     time.Time
     RefreshInterval time.Duration
 }
@@ -362,7 +362,7 @@ func (d *Dashboard) ApplySnapshot(snapshot model.DashboardState) {
         d.renderStreams(snapshot.Plex)
         d.renderDownloads(snapshot.SABnzbd)
         d.renderUpcoming(snapshot.Sonarr, snapshot.Radarr)
-        d.renderRequests(snapshot.Overseerr)
+        d.renderRequests(snapshot.Seerr)
         d.renderQueue(snapshot)
         d.renderFooter(snapshot)
     })
