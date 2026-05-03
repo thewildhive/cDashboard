@@ -1,53 +1,24 @@
 # cDashboard Technical Specification
 
-## Technical Direction
+## Context
 
-cDashboard will be a Go terminal application using `tview` on top of `tcell`.
+cDashboard will be a new Go terminal application for the behavior specified in `spec/PRODUCT.md`. The repository currently contains only specification files, so this document defines the initial architecture for later implementation rather than describing existing code.
 
-Primary framework:
+The product is table-heavy and read-only: a stable dashboard, service cards, service health, Plex streams, recent media, queue data, calendar data, and pending requests. The implementation should optimize for predictable rendering, testable data normalization, and safe partial-failure handling before adding richer interactions.
 
-- `github.com/rivo/tview`
-- `github.com/gdamore/tcell/v2`
+Primary framework choice:
 
-Fallback framework:
+1. Use `github.com/rivo/tview` for layout, tables, text views, boxes, and the application event loop.
+2. Use `github.com/gdamore/tcell/v2` for terminal primitives, input events, Unicode, color, and resize handling.
+3. Treat `github.com/mum4k/termdash` as a fallback only if future requirements shift toward chart-heavy widgets.
 
-- `github.com/mum4k/termdash`
+The main technical constraints come directly from `PRODUCT.md`: stable in-place refreshes, per-service error isolation, last-known-good preservation, mock mode, terminal-size gating, and no secret leakage.
 
-Rationale:
+## Proposed Changes
 
-- `tview` provides mature tables, text views, boxes, flex layouts, grid layouts, pages, and an application event loop.
-- The dashboard is table-heavy, especially the Plex active streams panel.
-- `tview.Application.QueueUpdateDraw` provides a practical safe-update mechanism for background API polling.
-- `tcell` provides the terminal primitives, Unicode handling, colors, input events, and resize events.
-- Termdash is strong for charts, gauges, and dashboard widgets, but the MVP is denser and more table-driven than chart-driven.
-- Bubble Tea/Lip Gloss remain useful comparison points, but would require more custom table/layout rendering for this version.
+### Project Shape
 
-## Versioning Policy
-
-Use stable, pinned Go module versions.
-
-Guidelines:
-
-- Use tagged releases where available.
-- Do not track framework `master` branches in `go.mod` for normal development.
-- Keep `go.mod` and `go.sum` committed once the codebase exists.
-- Upgrade dependencies intentionally and test the TUI after upgrades.
-
-## Runtime Model
-
-The app has three main runtime loops:
-
-- TUI event loop owned by `tview.Application`.
-- Polling scheduler loop owned by `internal/poller`.
-- Optional log writer/file output managed by `internal/logging`.
-
-Only the TUI event loop may mutate `tview` widgets.
-
-Background goroutines must publish normalized snapshots. The dashboard applies those snapshots through `Application.QueueUpdateDraw`.
-
-## Directory Structure
-
-Recommended structure:
+Implement the app as a standard Go module with one CLI entrypoint and internal packages. The planned structure is:
 
 ```text
 cDashboard/
@@ -116,20 +87,36 @@ cDashboard/
 
 Package responsibilities:
 
-- `cmd/cdashboard`: parse CLI flags, load config, wire dependencies, start app.
-- `internal/config`: typed TOML config, env secret lookup, validation.
-- `internal/clients`: service-specific HTTP clients and response parsing.
-- `internal/model`: normalized app-owned data structures used outside client packages.
-- `internal/poller`: concurrent polling, cancellation, backoff, stale detection, snapshot emission.
-- `internal/app`: app state, state merging, and store/reducer logic.
-- `internal/tui`: all `tview` layout, widgets, color mapping, and rendering.
-- `internal/mock`: anonymized fixtures for offline mode and tests.
-- `internal/logging`: file logging setup.
-- `internal/httpx`: shared HTTP timeout, headers, JSON decoding, and safe error handling helpers.
+1. `cmd/cdashboard` parses CLI flags, loads config, wires dependencies, starts logging, starts polling, and runs the TUI.
+2. `internal/config` owns TOML decoding, defaults, validation, and environment-secret lookup.
+3. `internal/clients` contains service-specific HTTP clients, raw API response structs, and sanitizers.
+4. `internal/httpx` provides shared HTTP client setup, context timeouts, headers, JSON decoding, and safe error helpers.
+5. `internal/model` contains app-owned normalized data structures. Raw API structs must not cross this boundary.
+6. `internal/poller` owns refresh scheduling, manual refresh requests, service concurrency, cancellation, backoff, stale detection, and result publication.
+7. `internal/app` owns dashboard state, last-known-good merge rules, and immutable snapshots for rendering.
+8. `internal/tui` owns all `tview` primitives, layout, theme mapping, widget updates, keybinds, size gating, and panel row building.
+9. `internal/mock` provides deterministic anonymized fixtures for mock mode and tests.
+10. `internal/logging` configures file logging and redaction helpers.
 
-## Data Flow
+### Dependency and Version Policy
 
-Data must flow in one direction:
+Use stable, pinned Go module versions. `go.mod` and `go.sum` should be committed once code exists. Use tagged releases where possible and avoid tracking dependency `master` branches for normal development.
+
+For TOML, prefer the simplest library that gives clear decoding and validation behavior. `github.com/pelletier/go-toml/v2` or `github.com/BurntSushi/toml` are both acceptable; choose one during implementation and keep config parsing centralized in `internal/config`.
+
+### Runtime Model
+
+The app has three main runtime loops:
+
+1. The TUI event loop, owned by `tview.Application`.
+2. The polling scheduler loop, owned by `internal/poller`.
+3. File logging, owned by `internal/logging`.
+
+Only the TUI event loop may mutate `tview` widgets. Background goroutines publish normalized service results or app snapshots. The dashboard applies updates through `Application.QueueUpdateDraw` to satisfy `PRODUCT.md` behavior 27 and 36.
+
+### Data Flow
+
+Data flows in one direction:
 
 ```text
 Service APIs
@@ -137,19 +124,17 @@ Service APIs
   -> sanitizers
   -> normalized model snapshots
   -> poller result channel
-  -> app state reducer/store
+  -> app store/reducer
   -> immutable dashboard snapshot
   -> tview QueueUpdateDraw
-  -> widgets
+  -> stable widgets
 ```
 
-Do not let raw API response structs reach the TUI.
+Do not let raw API response structs reach `internal/tui`. Do not let TUI widgets call service clients directly. This boundary keeps panel rendering testable and protects the UI from malformed service responses.
 
-Do not let TUI widgets call service clients directly.
+### State Model
 
-## State Model
-
-Use one normalized root state.
+Use one normalized root state in `internal/model`:
 
 ```go
 type DashboardState struct {
@@ -164,13 +149,14 @@ type DashboardState struct {
 }
 ```
 
-Each service state should include data and status separately.
+Each service status should keep status metadata separate from service data:
 
 ```go
 type ServiceStatus struct {
     Name        ServiceName
     Enabled     bool
     Online      bool
+    Degraded    bool
     Stale       bool
     LastAttempt time.Time
     LastSuccess time.Time
@@ -180,7 +166,7 @@ type ServiceStatus struct {
 }
 ```
 
-Preserve last known good data independently from the latest error.
+Service poll results should represent data and failure independently so the reducer can preserve last-known-good data:
 
 ```go
 type ServiceSnapshot[T any] struct {
@@ -195,14 +181,158 @@ type ServiceSnapshot[T any] struct {
 
 Reducer rules:
 
-- On success, replace that service's data and clear its error.
-- On failure, keep that service's previous data and update its error/status fields.
-- On stale threshold breach, keep data visible and mark stale.
-- Never let one service update clear another service's data.
+1. On success, replace only that service's data, clear that service's error, set online/degraded/stale state, and update `LastSuccess`.
+2. On failure, retain that service's previous data and update only its status/error fields.
+3. On stale threshold breach, keep data visible and mark that service stale.
+4. Never let a service update clear another service's data.
+5. Never store secret values in state.
 
-## UI Model
+These rules implement `PRODUCT.md` behavior 28 through 35 and 48.
 
-Use a root `Dashboard` controller with stable child widgets.
+### Configuration
+
+Use a human-editable TOML config with defaults applied before validation. The config shape should include:
+
+```go
+type Config struct {
+    Mode            string        `toml:"mode"`
+    RefreshInterval time.Duration `toml:"refresh_interval"`
+    RequestTimeout  time.Duration `toml:"request_timeout"`
+    StaleAfter      time.Duration `toml:"stale_after"`
+    MinimumColumns  int           `toml:"minimum_columns"`
+    MinimumRows     int           `toml:"minimum_rows"`
+    Plex            PlexConfig    `toml:"plex"`
+    Sonarr          APIConfig     `toml:"sonarr"`
+    Radarr          APIConfig     `toml:"radarr"`
+    SABnzbd         APIConfig     `toml:"sabnzbd"`
+    Overseerr       APIConfig     `toml:"overseerr"`
+}
+
+type APIConfig struct {
+    Enabled   bool   `toml:"enabled"`
+    URL       string `toml:"url"`
+    APIKeyEnv string `toml:"api_key_env"`
+}
+
+type PlexConfig struct {
+    Enabled  bool   `toml:"enabled"`
+    URL      string `toml:"url"`
+    TokenEnv string `toml:"token_env"`
+}
+```
+
+If the selected TOML decoder does not decode `time.Duration` from strings directly, decode duration values as strings and parse them with `time.ParseDuration` during validation.
+
+Validation rules:
+
+1. `mode` must be `mock` or `live`.
+2. `refresh_interval` defaults to `15s` and must be positive.
+3. `request_timeout` must be positive and less than `refresh_interval`.
+4. `stale_after` defaults to `45s` and should be greater than `refresh_interval`.
+5. `minimum_columns` defaults to `160` and must be positive.
+6. `minimum_rows` defaults to `40` and must be positive.
+7. In `live` mode, enabled services must have a URL and token/API-key environment variable name.
+8. In `live` mode, configured secret environment variables must exist before polling starts.
+9. In `mock` mode, live service URLs and credentials are not required.
+10. Validation errors must name invalid keys without including secret values.
+
+These rules implement `PRODUCT.md` behavior 38 through 43 and 48.
+
+### HTTP Clients and Sanitization
+
+Use one shared HTTP client configuration with per-request contexts. Service clients are responsible for authentication shape, endpoint paths, raw response structs, decoding, and conversion into normalized models.
+
+HTTP rules:
+
+1. Accept `context.Context` on every service call.
+2. Use `context.WithTimeout` per request.
+3. Set service-specific auth headers or query parameters inside the relevant client package.
+4. Decode JSON into explicit structs.
+5. Return errors with service name, operation, status class, and safe message.
+6. Do not panic on malformed service responses.
+7. Sanitize raw data before returning it to `internal/app` or `internal/tui`.
+8. Redact tokens, auth headers, and private URLs from returned errors and logs.
+
+Plex stream normalization should produce a stable `ActiveStream` model:
+
+```go
+type StreamMode string
+
+const (
+    StreamModeDirectPlay   StreamMode = "direct_play"
+    StreamModeDirectStream StreamMode = "direct_stream"
+    StreamModeTranscode    StreamMode = "transcode"
+    StreamModeUnknown      StreamMode = "unknown"
+)
+
+type ActiveStream struct {
+    User          string
+    Title         string
+    Device        string
+    Location      string
+    Quality       string
+    BandwidthKbps int
+    ProgressPct   int
+    ETA           string
+    Mode          StreamMode
+    VideoCodec    string
+    AudioCodec    string
+    Stale         bool
+}
+```
+
+Plex sanitization defaults:
+
+1. Missing user: `unknown`.
+2. Missing title: `unknown item`.
+3. Missing device: `unknown device`.
+4. Missing location: `unknown`.
+5. Missing quality: `unknown`.
+6. Missing bandwidth: `0`.
+7. Invalid progress: clamp to `0..100`.
+8. Unknown transcode status: `StreamModeUnknown`.
+9. Missing ETA: `-`.
+
+Sonarr and Radarr should normalize queue and calendar entries into shared app models where practical. SABnzbd should normalize download queue entries into one stable download model. Overseerr should normalize requests into one stable request model. API-specific status strings must be mapped to semantic statuses before color or warning logic is applied.
+
+These choices implement `PRODUCT.md` behavior 13 through 23, 34, 35, and 48.
+
+### Polling and Concurrency
+
+Each enabled service should have a poller interface similar to:
+
+```go
+type ServicePoller interface {
+    Name() model.ServiceName
+    Poll(ctx context.Context) (model.ServiceData, error)
+}
+```
+
+The scheduler should:
+
+1. Run under a parent context cancelled on shutdown.
+2. Tick at the configured refresh interval.
+3. Accept manual refresh requests from the TUI.
+4. Poll enabled services concurrently per refresh cycle.
+5. Use per-service timeout contexts.
+6. Keep service failures isolated and collect all results.
+7. Apply per-service backoff after failures.
+8. Reset backoff on success.
+9. Stop all work promptly on context cancellation.
+10. Publish service results without blocking the TUI event loop.
+
+A simple `sync.WaitGroup` plus result channel is likely clearer than `errgroup` because one service failure must not cancel sibling service polling. If `errgroup` is used, it must collect service errors without violating `PRODUCT.md` behavior 28.
+
+Default backoff policy:
+
+1. Initial failure backoff: `5s`.
+2. Maximum backoff: `2m`.
+3. Small jitter to avoid synchronized retries.
+4. Manual refresh may bypass current sleep but must still respect per-request timeouts.
+
+### TUI Layout and Rendering
+
+Use a root `Dashboard` controller with stable child widgets:
 
 ```go
 type Dashboard struct {
@@ -221,35 +351,7 @@ type Dashboard struct {
 }
 ```
 
-The dashboard owns layout and widget references. Panel rendering should be split into small functions that transform normalized data into rows.
-
-Example:
-
-```go
-func BuildActiveStreamRows(state model.PlexState) []TableRow
-func ApplyRows(table *tview.Table, rows []TableRow)
-```
-
-Keep panel row builders pure so they can be tested without a terminal.
-
-## Rendering Rules
-
-Clean rendering is a core requirement.
-
-Rules:
-
-- Build the widget tree once at startup.
-- Keep widget identities stable across refreshes.
-- Update content in place inside `QueueUpdateDraw`.
-- Never mutate widgets from polling goroutines.
-- Prepare table rows before clearing/replacing table cells.
-- Use fixed column definitions and deterministic truncation.
-- Avoid animation in the MVP.
-- Avoid frequent full layout rebuilds.
-- Keep refresh interval at `15s` by default.
-- Batch all panel updates for a snapshot into one queued draw.
-
-Recommended UI update path:
+Build the widget tree once at startup and keep widget identities stable across refreshes. Update content in place inside one queued draw per snapshot:
 
 ```go
 func (d *Dashboard) ApplySnapshot(snapshot model.DashboardState) {
@@ -267,34 +369,16 @@ func (d *Dashboard) ApplySnapshot(snapshot model.DashboardState) {
 }
 ```
 
-## Terminal Size Handling
+Panel rendering should be split into pure row-building functions and impure widget application functions:
 
-The product target is an `800x600`-class terminal window. The implementation sees terminal size as cells.
+```go
+func BuildActiveStreamRows(state model.PlexState) []TableRow
+func ApplyRows(table *tview.Table, rows []TableRow)
+```
 
-Default size gate:
+Pure row builders make `PRODUCT.md` behavior 11 through 24 and 36 through 37 testable without a terminal.
 
-- `minimum_columns = 160`
-- `minimum_rows = 40`
-
-Terminal size handling:
-
-- On startup, check the current terminal cell size.
-- On resize, re-check the size.
-- If below minimum, replace the root with a size error view.
-- If size becomes valid again, restore the dashboard root.
-- Keep `R` available to retry and `Q` available to quit.
-
-Implementation note:
-
-- `tview` roots resize with the terminal.
-- Use `Application.SetBeforeDrawFunc` or a lightweight resize-aware wrapper if needed.
-- Do not implement compact mode for MVP unless the hard minimum later proves too strict.
-
-## Layout Strategy
-
-Use nested `tview.Flex` layouts first.
-
-Wide layout:
+Initial layout should use nested `tview.Flex` containers:
 
 ```text
 root vertical
@@ -317,18 +401,44 @@ root vertical
 
 Initial sizing:
 
-- Sidebar: fixed `24-28` columns.
-- Footer: fixed `1` row.
-- Top row: fixed `10-12` rows.
-- Active Streams: fixed `11-14` rows.
-- Bottom grid: remaining height.
-- Gaps: `1` column or row where needed.
+1. Sidebar fixed width: `24` to `28` columns.
+2. Footer fixed height: `1` row.
+3. Top row fixed height: `10` to `12` rows.
+4. Active Streams fixed height: `11` to `14` rows.
+5. Bottom grid takes remaining height.
+6. Gaps may use `1` column or row where needed.
 
-Use `tview.Table` for dense panels and `tview.TextView` for service cards and footer.
+Rendering rules:
 
-## Styling
+1. Prepare table rows before clearing or replacing table cells.
+2. Use fixed column definitions and deterministic truncation.
+3. Avoid animation in the MVP.
+4. Avoid frequent full layout rebuilds.
+5. Batch all panel updates for a snapshot into one queued draw.
+6. Render explicit empty states instead of blank panels.
+7. Keep color tied to semantic status, not raw API status strings.
 
-Define semantic colors in one theme package/file.
+These rules implement `PRODUCT.md` behavior 1 through 24 and 36 through 37.
+
+### Terminal Size Handling
+
+Track terminal size in cells and compare it to config. The default gate is `160x40` cells.
+
+Size behavior:
+
+1. Check size on startup before rendering the dashboard panels.
+2. Re-check size on terminal resize.
+3. If below minimum, replace the app root with a size error view.
+4. If size becomes valid again, restore the dashboard root.
+5. Keep `R` available to retry and `Q` available to quit while the error view is displayed.
+
+Use `tview.Application.SetBeforeDrawFunc`, a resize-aware wrapper, or explicit screen-size reads in the app loop depending on what proves least fragile during implementation. Do not implement compact mode for MVP.
+
+These rules implement `PRODUCT.md` behavior 4 through 6.
+
+### Styling
+
+Define semantic colors in one theme file:
 
 ```go
 type Theme struct {
@@ -360,236 +470,70 @@ Default palette:
 | `AccentCyan` | `#22D3EE` | Titles and cyan accents |
 | `AccentGreen` | `#39FF88` | Progress and positive activity |
 
-Unicode symbols:
+Unicode symbols may include status dots, progress blocks, sparkline blocks, warning/error symbols, and up/down arrows. Styling should communicate service state first and decoration second.
 
-- Online/status dot: `●`
-- Progress filled: `█`
-- Progress empty: `░`
-- Sparkline blocks: `▁▂▃▄▅▆▇█`
-- Warning: `!`
-- Error: `x`
-- Up/down: `↑` and `↓`
+### Mock Mode
 
-Avoid over-styling. Color should communicate status first.
+Mock data is a first-class input path, not a TUI-only shortcut. Store fixtures in `internal/mock` as normalized models that can feed the same app store and TUI rendering path as live service data.
 
-## Configuration
+Mock fixtures should include:
 
-Use TOML.
+1. Healthy, warning, error, and stale service states.
+2. Empty states for streams, downloads, releases, and requests.
+3. Plex direct play, direct stream, transcode, and unknown examples.
+4. Long titles and names to exercise truncation.
+5. API failure snapshots that preserve last-known-good data.
+6. No real hostnames, usernames, tokens, media titles from private servers, or private media-server details.
 
-Recommended package options:
+This implements `PRODUCT.md` behavior 41 and 42.
 
-- `github.com/BurntSushi/toml`
-- or `github.com/pelletier/go-toml/v2`
+### Logging
 
-Either is acceptable. Prefer the simpler option once coding starts.
-
-Config struct shape:
-
-```go
-type Config struct {
-    Mode            string        `toml:"mode"`
-    RefreshInterval time.Duration `toml:"refresh_interval"`
-    RequestTimeout  time.Duration `toml:"request_timeout"`
-    StaleAfter      time.Duration `toml:"stale_after"`
-    MinimumColumns  int           `toml:"minimum_columns"`
-    MinimumRows     int           `toml:"minimum_rows"`
-    Plex            PlexConfig    `toml:"plex"`
-    Sonarr          APIConfig     `toml:"sonarr"`
-    Radarr          APIConfig     `toml:"radarr"`
-    SABnzbd         APIConfig     `toml:"sabnzbd"`
-    Overseerr       APIConfig     `toml:"overseerr"`
-}
-
-type APIConfig struct {
-    Enabled   bool   `toml:"enabled"`
-    URL       string `toml:"url"`
-    APIKeyEnv string `toml:"api_key_env"`
-}
-
-type PlexConfig struct {
-    Enabled  bool   `toml:"enabled"`
-    URL      string `toml:"url"`
-    TokenEnv string `toml:"token_env"`
-}
-```
-
-If the chosen TOML library does not decode `time.Duration` from strings directly, decode into string fields and parse with `time.ParseDuration` during validation.
-
-Validation rules:
-
-- `mode` must be `mock` or `live`.
-- In `live` mode, enabled services must have a URL.
-- In `live` mode, enabled services must have a token/key env name.
-- Secret env vars must exist for enabled services in `live` mode.
-- `refresh_interval` must be positive.
-- `request_timeout` must be positive and less than `refresh_interval`.
-- `stale_after` should be greater than `refresh_interval`.
-- minimum columns/rows must be positive.
-
-Never log secret values.
-
-## HTTP Client Rules
-
-Use one shared HTTP client configuration with per-request contexts.
-
-Rules:
-
-- Use `context.Context` for cancellation.
-- Use `context.WithTimeout` per request.
-- Set service-specific auth headers or query parameters in each client.
-- Decode JSON with explicit structs.
-- Return typed/normalized errors where useful.
-- Do not panic on malformed service responses.
-- Sanitize data before returning it to the app layer.
-
-## Polling and Concurrency
-
-Each enabled service should have a poller implementing:
-
-```go
-type ServicePoller interface {
-    Name() model.ServiceName
-    Poll(ctx context.Context) (model.ServiceData, error)
-}
-```
-
-The scheduler should:
-
-- Start one loop controlled by a parent context.
-- Tick at `refresh_interval`.
-- Allow manual refresh requests.
-- Poll all enabled services concurrently per refresh cycle.
-- Use per-service timeout contexts.
-- Apply per-service backoff after failures.
-- Publish a combined dashboard snapshot or individual service results to the app store.
-- Stop all work promptly on context cancellation.
-
-Preferred implementation:
-
-- Use `errgroup` only if all service errors are collected and do not cancel sibling services unintentionally.
-- A simple `sync.WaitGroup` plus result channel may be clearer for this app.
-
-Backoff:
-
-- Initial failure backoff: `5s`.
-- Maximum backoff: `2m`.
-- Reset on success.
-- Add small jitter to avoid synchronized retries.
-
-## Service Sanitization
-
-All clients must convert raw API fields into stable internal models.
-
-### Plex Streams
-
-Normalize Plex active session data into:
-
-```go
-type StreamMode string
-
-const (
-    StreamModeDirectPlay   StreamMode = "direct_play"
-    StreamModeDirectStream StreamMode = "direct_stream"
-    StreamModeTranscode    StreamMode = "transcode"
-    StreamModeUnknown      StreamMode = "unknown"
-)
-
-type ActiveStream struct {
-    User          string
-    Title         string
-    Device        string
-    Location      string
-    Quality       string
-    BandwidthKbps int
-    ProgressPct   int
-    ETA           string
-    Mode          StreamMode
-    VideoCodec    string
-    AudioCodec    string
-    Stale         bool
-}
-```
-
-Sanitization rules:
-
-- Missing user: `unknown`
-- Missing title: `unknown item`
-- Missing device: `unknown device`
-- Missing quality: `unknown`
-- Missing location: `unknown`
-- Missing bandwidth: `0`
-- Invalid progress: clamp to `0..100`
-- Unknown transcode status: `StreamModeUnknown`
-- Missing ETA: `-`
-
-### Other Services
-
-Sonarr and Radarr should normalize queue and calendar entries into shared app models where practical.
-
-SABnzbd should normalize download queue entries into one stable download model.
-
-Overseerr should normalize requests into one stable request model.
-
-Do not expose API-specific status strings directly to color/style logic. Map them to semantic statuses first.
-
-## Mock Data
-
-Mock data is a first-class input path.
-
-Requirements:
-
-- Deterministic default dataset.
-- No real hostnames, usernames, tokens, or media-server identifiers.
-- Enough rows to exercise truncation and dense rendering.
-- Include healthy, warning, error, and stale states.
-- Include Plex direct play, direct stream, transcode, and unknown examples.
-- Include API failure snapshots while preserving last known good data.
-
-Tests should be able to import mock fixtures without starting the TUI.
-
-## Logging
-
-The TUI owns stdout and stderr during normal operation.
+The TUI owns stdout and stderr during normal operation. Runtime logs should go to a file once logging is configured.
 
 Logging rules:
 
-- Log to a file, not stdout.
-- Default log path should be documented once CLI/config exists.
-- Redact secrets and auth headers.
-- Include service name, operation, duration, and error class.
-- Avoid logging full raw API payloads by default.
+1. Log service name, operation, duration, and error class.
+2. Redact secrets, tokens, authorization headers, and configured secret environment values.
+3. Avoid logging full raw API payloads by default.
+4. Do not write routine poll logs to stdout/stderr while the TUI is active.
+5. Document the default log path once CLI/config behavior is implemented.
 
-## Testing Strategy
+These rules implement `PRODUCT.md` behavior 35, 47, and 48.
 
-Test without relying on terminal rendering wherever possible.
+## Testing and Validation
+
+Automated validation should focus on packages that do not require a real terminal. The TUI should be manually checked for visual fit, flicker, and resize behavior after unit-level confidence is in place.
 
 Unit tests:
 
-- Config loading and validation.
-- Secret-env lookup behavior with redaction.
-- API response sanitizers.
-- Poller success/failure state transitions.
-- Stale data detection.
-- Backoff behavior.
-- Table row builders.
-- String truncation and progress bar formatting.
+1. Config defaults and validation cover `PRODUCT.md` behavior 25, 31, and 38 through 43.
+2. Secret-env lookup and redaction cover behavior 35, 40, 43, and 48.
+3. Plex stream sanitizers cover behavior 13 through 17.
+4. Sonarr/Radarr/SABnzbd/Overseerr sanitizers cover behavior 18 through 23 and 35.
+5. App reducer success, failure, stale, and cross-service isolation cover behavior 28 through 33.
+6. Backoff and scheduler timing cover behavior 25 through 27.
+7. Table row builders cover behavior 8 through 24, 36, and 37.
+8. Mock fixtures are deterministic and anonymized, covering behavior 41 and 42.
 
 Integration tests:
 
-- API clients against local `httptest.Server` fixtures.
-- Scheduler cancellation with context timeout.
-- Mock mode app startup without service credentials.
+1. Service clients against `httptest.Server` fixtures for success, malformed payloads, HTTP errors, timeouts, and auth placement.
+2. Scheduler cancellation with a parent context to prove shutdown does not hang.
+3. Manual refresh path while a scheduled refresh is pending.
+4. Mock-mode app startup without service credentials.
+5. Live-mode config validation failure when required secret env vars are missing.
 
 Manual verification:
 
-- Run mock TUI at valid size.
-- Resize below minimum and back above minimum.
-- Simulate API failure and confirm last good data stays visible.
-- Confirm no obvious flicker during refresh.
+1. Run mock TUI at or above `160x40` and confirm every required region from `PRODUCT.md` behavior 3 renders.
+2. Resize below the minimum and back above it to confirm behavior 5 and 6.
+3. Trigger service failure fixtures and confirm behavior 28 through 33.
+4. Confirm normal refreshes do not visibly flash or jitter columns, covering behavior 36 and 37.
+5. Confirm `Q`, `Ctrl+C`, and `R` work during normal display, during slow polling, and from the size error screen, covering behavior 26, 27, and 44.
+6. Inspect logs and error screens to confirm no secrets are printed, covering behavior 48.
 
-## Build and Run Targets
-
-Initial expected commands once code exists:
+Expected developer commands once code exists:
 
 ```bash
 go run ./cmd/cdashboard --config ./config.example.toml
@@ -597,29 +541,23 @@ go test ./...
 go build ./cmd/cdashboard
 ```
 
-Add a sample config file once the config package exists:
+Add `config.example.toml` when the config package exists. It must not contain real secrets.
 
-```text
-config.example.toml
-```
+## Risks and Mitigations
 
-Do not include real secrets in examples.
+1. Plex stream and transcode fields may differ by server version, client, media type, or playback mode. Mitigate with defensive sanitizers, fixtures from multiple response shapes, and `unknown` fallbacks.
+2. Some service APIs may not expose reliable uptime. Mitigate by displaying `unknown` unless the specific API behavior is verified.
+3. `800x600` is pixel terminology while terminal size is measured in cells. Mitigate with configurable `minimum_columns` and `minimum_rows` defaults.
+4. Excessive redraws or widget rebuilding can cause flicker. Mitigate with stable widgets and one `QueueUpdateDraw` per snapshot.
+5. Table column jitter can make the dashboard hard to read. Mitigate with fixed column definitions and deterministic truncation.
+6. Unicode and true color are assumed, but fonts may render symbols differently. Mitigate by keeping text labels and status words meaningful even when symbols degrade.
+7. Framework choice could become wrong if the product shifts toward charts or interactive workflows. Mitigate by keeping data normalization and app state independent from `tview`.
 
-## Risks
+## Follow-ups
 
-- Plex stream and transcode fields may differ by server version, client, media type, or playback mode.
-- Some service APIs may not expose reliable uptime.
-- `800x600` is pixel terminology, while the TUI receives character-cell dimensions.
-- Excessive redraws or widget rebuilding can cause flicker.
-- Table column jitter can make the dashboard hard to read.
-- Unicode and true color are assumed, but user terminal fonts may still render some symbols poorly.
-- Termdash may become more attractive if charting becomes more important than tables.
-- Bubble Tea may become more attractive if the product shifts from dashboard monitoring to interactive workflows.
-
-## Technical Open Questions
-
-- Which TOML library should be selected after a quick implementation spike?
-- Which Plex endpoint provides the most stable stream bandwidth and transcode details for the current stable Plex release?
-- Which services expose uptime directly, and which should display `unknown`?
-- Should service polling publish individual service updates as they arrive or only publish a combined refresh-cycle snapshot?
-- What default log file location should be used on Windows, Linux, and macOS?
+1. Choose the TOML library during implementation and document why if the choice affects validation behavior.
+2. Verify the most stable Plex endpoint for active stream bandwidth and transcode details.
+3. Verify which monitored services expose reliable uptime directly.
+4. Decide whether the poller should publish individual service updates as they arrive or only combined refresh-cycle snapshots after the first implementation spike.
+5. Choose a default log file location for macOS, Linux, and Windows when CLI/config work starts.
+6. Resolve the product open questions in `spec/PRODUCT.md` before implementing the affected panels.

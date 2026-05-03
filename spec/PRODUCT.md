@@ -1,319 +1,136 @@
 # cDashboard Product Specification
 
-## Purpose
+## Summary
 
-cDashboard is a Go-based terminal dashboard for monitoring a home media server stack from one dense, glanceable view.
+cDashboard is a Go-based terminal dashboard for monitoring a home media server stack from one dense, glanceable view. It gives a technical home-server operator read-only visibility into Plex, Sonarr, Radarr, SABnzbd, and Overseerr without requiring them to keep several browser tabs open or maintain a complex custom terminal UI.
 
-The dashboard monitors:
+## Problem
 
-- Plex
-- Sonarr
-- Radarr
-- SABnzbd
-- Overseerr
+The monitored services expose useful health, queue, playback, and request data, but each service presents that data in a separate UI. cDashboard should make the combined operational state visible in one stable terminal screen while keeping partial failures understandable instead of letting one bad service degrade the whole dashboard.
 
-The product should favor clear operational visibility over decorative animation. The target user is technical enough to configure local services and API keys, but should not need to maintain a complex custom-rendered terminal application.
+## Goals
 
-## Product Goals
+1. Show the health and activity of the media stack in one terminal screen.
+2. Keep the dashboard readable, stable, and scannable during refreshes.
+3. Preserve known-good data when one service fails or times out.
+4. Make API failures and stale data visible per service without blanking unrelated data.
+5. Support an offline/mock mode for development, demos, and automated tests.
+6. Keep the first implementation small enough to validate service by service.
 
-- Show the health and activity of the media stack in one terminal screen.
-- Preserve known good data when one service fails or times out.
-- Make API failures visible without destroying the rest of the dashboard.
-- Keep the UI readable, stable, and scannable during refreshes.
-- Provide an offline/mock mode for development, demos, and tests.
-- Keep the MVP small enough to build and validate service by service.
+## Non-goals
 
-## Non-Goals
+1. cDashboard is not a replacement for the Plex, Sonarr, Radarr, SABnzbd, or Overseerr web UIs.
+2. The MVP does not approve requests, delete downloads, edit queues, or mutate server state.
+3. The MVP does not support tiny terminal layouts or compact alternate dashboards.
+4. The MVP does not prioritize animations, mouse-first interaction, or user-defined themes.
+5. The MVP does not need pixel-perfect reproduction of any visual mockup when terminal constraints would make that fragile.
 
-- This is not a full replacement for Plex, Sonarr, Radarr, SABnzbd, or Overseerr web UIs.
-- The MVP will not edit queues, approve requests, delete downloads, or mutate server state.
-- The MVP will not support tiny terminal layouts.
-- The MVP will not prioritize animations, mouse-first interaction, or theme customization.
-- The MVP will not attempt pixel-perfect reproduction of the mockup when terminal constraints make that fragile.
+## Behavior
 
-## Display Requirements
+1. When launched at or above the configured minimum terminal size, cDashboard renders a full-screen terminal dashboard using a dark blue/cyan/neon-green visual style. The interface favors dense operational visibility over decorative motion.
 
-The hard minimum product target is an `800x600`-class terminal window.
+2. The dashboard monitors the following services when they are enabled in configuration: Plex, Sonarr, Radarr, SABnzbd, and Overseerr. A disabled service remains visible only if the implementation chooses to show disabled cards; if shown, it must be clearly marked disabled and must not appear failed.
 
-Terminal applications usually receive terminal size as character cells, not pixels. The implementation must therefore enforce a configured minimum grid size. The default grid threshold should be chosen to preserve the full dashboard layout on common modern terminal fonts, and it must be easy to adjust in config.
+3. The main dashboard layout contains these regions in the default view: a left service sidebar, a top row with `Recently Added` and `Health & Activity`, a central `Active Streams` table, a bottom grid with `Downloads`, `Upcoming Releases`, `Pending Requests`, and `Queue Summary`, and a one-row footer.
 
-Initial implementation defaults:
+4. The dashboard targets an `800x600`-class terminal window. Because terminal apps receive size in character cells, the product default minimum is `160` columns by `40` rows, with a comfortable target of `180x45` cells or larger.
 
-- `minimum_columns = 160`
-- `minimum_rows = 40`
-- Target comfortable size: `180x45` cells or larger
-- If the terminal is too small, render only a clear size error screen
+5. If the current terminal is below the configured minimum size, cDashboard does not render the dashboard panels. It renders a clear size error screen that includes the required size, the current size, and the available actions to retry or quit.
 
-Small-terminal behavior:
+6. From the size error screen, pressing `R` retries the size check and pressing `Q` quits. If the terminal becomes large enough, the app returns to the full dashboard without requiring a restart.
 
-```text
-cDashboard requires a larger terminal.
-Minimum: 160x40 cells, 800x600-class window.
-Current: 132x32 cells.
+7. The app assumes a modern terminal with Unicode and color support. Unicode symbols may be used for status dots, progress bars, sparklines, and directional indicators, but the dashboard must remain understandable when symbols render imperfectly.
 
-Resize the terminal and press R to retry, or Q to quit.
-```
+8. Each service card in the sidebar shows the service name, status, freshness, API health, and service-specific summary metrics. A service card must distinguish at least `online`, `offline`, `degraded`, `stale`, and `disabled` when those states apply.
 
-Unicode is acceptable. The product assumes a modern terminal with Unicode and color support.
+9. Plex summary metrics include active streams, users, and bandwidth when available. Sonarr and Radarr summary metrics include queue count, grabbed count, and RSS or calendar activity when available. SABnzbd summary metrics include queue count, speed, and queue size when available. Overseerr summary metrics include total requests, pending requests, and issue count when available.
 
-## Dashboard Layout
+10. The sidebar may show a compact sparkline or text-only activity indicator per service. The absence of sparkline data must not be treated as an error; the card may show a stable placeholder such as `unknown` or `-`.
 
-The visual target is a dark blue/cyan/neon-green terminal dashboard inspired by the supplied mockup.
+11. `Recently Added` shows recent Plex items in a compact list or table. Missing optional metadata such as year, library, poster, or added timestamp must not prevent the item title from rendering.
 
-Required regions:
+12. `Health & Activity` shows per-service status and lightweight resource or activity metrics where available. This panel must make current errors and stale states visible without requiring the user to inspect logs.
 
-- Left sidebar with one service card per monitored service.
-- Top row with `Recently Added` and `Health & Activity` panels.
-- Main center `Active Streams` table for Plex sessions.
-- Bottom grid with `Downloads`, `Upcoming Releases`, `Pending Requests`, and `Queue Summary`.
-- Footer with keybinds, refresh interval, current view, and last updated timestamp.
+13. `Active Streams` is the primary table in the app. It shows active Plex sessions with user, item title, location, device, quality, bandwidth, playback mode, progress, and ETA when those values are available.
 
-### Sidebar
+14. Plex stream and transcode data must be sanitized before rendering. Missing or inconsistent stream fields render as safe placeholders rather than corrupting alignment, creating blank rows, or crashing the app.
 
-Each service card should show:
+15. Active stream playback mode renders as `direct play`, `direct stream`, `transcode`, or `unknown`. Unknown or inconsistent Plex transcode indicators must render as `unknown`, not as an inferred value.
 
-- Service name
-- Status dot
-- Online/offline/degraded/stale state
-- Uptime when available from the service API
-- API health/error state
-- A compact activity sparkline or text-only activity indicator
-- Service-specific summary metrics
+16. Active stream progress renders as a bounded value from `0` through `100`. Invalid, negative, missing, or over-maximum progress data must be clamped or replaced with a safe placeholder before display.
 
-Examples:
+17. If there are no active Plex streams, `Active Streams` renders an explicit empty state such as `No active streams`, not a blank panel.
 
-- Plex: active streams, users, bandwidth
-- Sonarr: queue count, grabbed count, RSS count
-- Radarr: queue count, grabbed count, RSS count
-- SABnzbd: queue count, speed, queue size
-- Overseerr: total requests, pending requests, issue count
+18. `Downloads` shows active and queued SABnzbd jobs. Each visible job should show enough information to understand what is downloading, progress, speed, size or remaining size, and status when available.
 
-### Top Row
+19. If SABnzbd has no active or queued jobs, `Downloads` renders an explicit empty state such as `No active downloads`.
 
-`Recently Added` should show recently added Plex items.
+20. `Upcoming Releases` shows relevant Sonarr and Radarr calendar entries. Entries must identify whether they come from Sonarr or Radarr when both services are enabled.
 
-`Health & Activity` should show per-service status and lightweight resource/activity metrics where available.
+21. If there are no upcoming releases in the configured lookahead window, `Upcoming Releases` renders an explicit empty state.
 
-### Active Streams
+22. `Pending Requests` shows Overseerr requests that still require attention. Approved-but-not-fulfilled requests are product-ambiguous and should remain an open question until implementation confirms the desired grouping.
 
-The `Active Streams` panel is the most important table in the app.
+23. `Queue Summary` aggregates queue counts and status across Sonarr, Radarr, SABnzbd, and any other enabled service with queue-like state. The panel must not double-count the same item across services unless the data source really reports distinct queue entries.
 
-It should show:
+24. The footer is one row tall and includes the app name, version when available, keybind hints, current view or focus when focus is implemented, refresh interval, last updated timestamp, and a global stale/error indicator when any service needs attention.
 
-- User
-- Item title
-- Location
-- Device
-- Quality
-- Bandwidth
-- Playback mode, such as direct play, direct stream, transcode, or unknown
-- Progress bar
-- ETA
+25. The default refresh interval is `15s`. The interval is configurable and must be shown in the footer or equivalent status area.
 
-Plex stream/transcode data must be sanitized before rendering so incomplete or inconsistent API responses cannot corrupt the UI.
+26. Pressing `R` triggers a manual refresh. Manual refresh must remain available while the dashboard is otherwise idle, while a previous refresh is finishing, and from the size error screen.
 
-### Bottom Grid
+27. Background polling must not block keyboard input, quitting, terminal resize handling, or redraws. The user must be able to press `Q` or `Ctrl+C` to quit even when service calls are slow or failing.
 
-`Downloads` should show active and queued SABnzbd jobs.
+28. Polling failures are handled per service. A failure from one service must not clear, hide, or mark unrelated services as failed.
 
-`Upcoming Releases` should show Sonarr/Radarr calendar data.
+29. On a successful service refresh, cDashboard replaces that service's visible data with the latest sanitized snapshot, clears that service's current error, records `last_success`, and updates the displayed freshness state.
 
-`Pending Requests` should show Overseerr requests.
+30. On a failed service refresh, cDashboard keeps that service's last known good data visible, records the new error message for that service, records `last_attempt`, and marks the service degraded or offline as appropriate.
 
-`Queue Summary` should aggregate queue counts and status across services.
+31. A service's data becomes stale when its last successful refresh exceeds the configured stale threshold. The default stale threshold is `45s`.
 
-### Footer
+32. Stale data remains visible but is clearly marked stale in the service card and any relevant panel. Stale marking must be per service, not global-only.
 
-The footer should be one row tall and include:
+33. If a service has never successfully loaded, its panels or rows show an unavailable/error state rather than pretending stale data exists.
 
-- App name and version
-- Keybinds
-- Current view/focus
-- Refresh interval
-- Last updated timestamp
-- Global stale/error indicator when relevant
+34. Service uptime is shown when a service API exposes reliable uptime. If reliable uptime is unavailable or unverified, cDashboard shows `unknown` rather than inferring uptime from unrelated fields.
 
-## Core Behavior
+35. API failures must be visible in the service card and `Health & Activity`. Error text should be concise enough to fit the dashboard and must not expose secrets, tokens, or full private URLs.
 
-### Refreshing
+36. The dashboard updates in place during normal refreshes. It should not visibly flash, rebuild the whole screen, reorder stable rows unnecessarily, or jitter table columns when values of similar shape update.
 
-- The refresh interval is configurable.
-- Default refresh interval should be `15s`.
-- Manual refresh should be available with `R`.
-- Background polling must never block keyboard input or screen redraw.
+37. Long text values such as titles, usernames, device names, or request names are truncated deterministically when they do not fit. Truncation must preserve table alignment and should keep the most useful identifying text visible.
 
-### API Failures
+38. Config is provided through a human-editable TOML file. Secrets are referenced by environment variable name in config and are read from the environment at runtime.
 
-API failures are handled per service.
+39. Config supports at least service URLs, service token or API-key environment variable names, refresh interval, request timeout, stale threshold, minimum terminal size, and `mock` versus `live` mode.
 
-On success:
+40. Config validation failures are shown as clear startup errors. Validation errors must identify the invalid setting and expected shape without printing secret values.
 
-- Replace that service's data with the latest sanitized snapshot.
-- Clear the service error state.
-- Update `last_success`.
+41. In `mock` mode, cDashboard starts without real service URLs or credentials and renders deterministic anonymized data that exercises healthy, warning, error, empty, and stale states.
 
-On failure:
+42. Mock data must not contain real usernames, tokens, hostnames, media titles from the user's private server, or other private media-server details.
 
-- Keep the last known good data.
-- Store the new error message for that service.
-- Update `last_attempt`.
-- Show the error in the service card and health panel.
-- Mark the data stale once it exceeds the stale threshold.
+43. In `live` mode, enabled services require valid connection settings and a configured environment variable name for their token or API key. Missing live-mode secrets must fail validation before polling starts.
 
-Failure of one service must not blank the dashboard or block other services.
+44. MVP keybinds are `Q` or `Ctrl+C` to quit and `R` to refresh. If panel focus is implemented, `Tab` cycles focus and arrow keys scroll the focused table.
 
-### Stale Data
+45. Mouse support is deferred. The dashboard must remain fully usable for MVP monitoring with the keyboard-only controls above.
 
-Each service should track freshness independently.
+46. The MVP is read-only. No displayed action may imply that cDashboard can mutate queues, approvals, downloads, libraries, or service configuration.
 
-Default stale threshold:
+47. File logging is allowed, but normal dashboard operation owns the terminal screen. Logs must not write routine diagnostic output into the dashboard's stdout/stderr stream.
 
-- `stale_after = 45s`
+48. API tokens, authorization headers, and secret values must never appear in dashboard panels, startup errors, stdout/stderr, or logs.
 
-Stale data should remain visible but clearly marked.
+49. The smallest useful first version includes static mock-mode layout, terminal-size gating, config loading and validation, real service health checks, Plex active streams, Plex recently added, SABnzbd queue data, Sonarr/Radarr calendar and queue summaries, Overseerr pending requests, concurrent polling with timeouts, per-service stale/error states, last-known-good preservation, and file logging.
 
-### Uptime
+50. Deferred scope includes mutating actions, mouse support, historical charts, notifications, multi-theme support, plugin support, Prometheus/exporter mode, advanced compact layouts, and complex animations.
 
-Use service APIs for uptime where possible.
+51. **Open question:** Which Plex account or user naming field should be displayed when multiple names are available?
 
-If a service does not expose reliable uptime, show `unknown`. Do not infer uptime from unrelated fields unless the API behavior has been verified.
+52. **Open question:** Should local and remote Plex streams be grouped separately, or only tagged by location in the stream row?
 
-### Mock Mode
+53. **Open question:** Which queue states from Sonarr, Radarr, and SABnzbd deserve warning colors rather than neutral styling?
 
-The app must support anonymized fake data for:
-
-- UI development without real services
-- Non-connected demo mode
-- Automated tests
-- Golden/snapshot-style panel rendering tests
-
-Mock data must not contain real usernames, tokens, hostnames, or private media-server details.
-
-## Configuration
-
-Use a human-editable TOML config file with environment-variable references for secrets.
-
-Requirements:
-
-- Configurable service URLs
-- Configurable API key/token environment variable names
-- Configurable refresh interval
-- Configurable request timeout
-- Configurable stale threshold
-- Configurable minimum terminal size
-- `mock` and `live` modes
-- Validation with clear error messages
-
-Secrets should be read from environment variables, not stored directly in config files.
-
-Example:
-
-```toml
-mode = "live"
-refresh_interval = "15s"
-request_timeout = "5s"
-stale_after = "45s"
-minimum_columns = 160
-minimum_rows = 40
-
-[plex]
-enabled = true
-url = "http://plex.local:32400"
-token_env = "CDASHBOARD_PLEX_TOKEN"
-
-[sonarr]
-enabled = true
-url = "http://sonarr.local:8989"
-api_key_env = "CDASHBOARD_SONARR_API_KEY"
-
-[radarr]
-enabled = true
-url = "http://radarr.local:7878"
-api_key_env = "CDASHBOARD_RADARR_API_KEY"
-
-[sabnzbd]
-enabled = true
-url = "http://sabnzbd.local:8080"
-api_key_env = "CDASHBOARD_SABNZBD_API_KEY"
-
-[overseerr]
-enabled = true
-url = "http://overseerr.local:5055"
-api_key_env = "CDASHBOARD_OVERSEERR_API_KEY"
-```
-
-## Keybinds
-
-MVP keybinds:
-
-- `Q` or `Ctrl+C`: quit
-- `R`: refresh now
-- `Tab`: cycle focused panel, if focus is implemented
-- Arrow keys: scroll focused table, if scrolling is implemented
-
-Mouse support is deferred.
-
-## MVP Scope
-
-The smallest useful first version includes:
-
-- Runnable TUI layout using fake data
-- Hard minimum terminal-size gate
-- TOML config loading and validation
-- Mock/offline mode
-- Real service health checks
-- Plex active streams
-- Plex recently added
-- SABnzbd queue summary and active downloads
-- Sonarr/Radarr calendar and queue summaries
-- Overseerr pending requests
-- Concurrent polling with timeouts
-- Per-service error and stale states
-- Last known good data preservation
-- File logging
-
-## Deferred Scope
-
-Defer until the dashboard is stable:
-
-- Mutating actions such as approving requests or deleting queue items
-- Mouse support
-- Historical charts
-- Notification integrations
-- Multi-theme support
-- Plugin system
-- Prometheus/exporter mode
-- Advanced compact layouts for small terminals
-- Complex animations
-
-## Development Milestones
-
-1. Build the static TUI layout with deterministic mock data.
-2. Add the minimum terminal-size gate.
-3. Add typed config loading and validation.
-4. Add normalized internal data models.
-5. Add mock data fixtures and non-connected mode.
-6. Add service API clients one at a time.
-7. Add concurrent polling with context cancellation, timeouts, and backoff.
-8. Wire snapshots into the UI safely.
-9. Add stale/error rendering and last-known-good behavior.
-10. Add tests for config, sanitization, state merging, and panel row generation.
-
-## Acceptance Criteria
-
-- The app starts in mock mode with no external services configured.
-- The app refuses to render the full dashboard below the configured minimum terminal size.
-- The dashboard does not visibly flash or rebuild the whole screen on normal refresh.
-- Failure of one service does not clear other services or crash the app.
-- Failure of one service does not clear that service's last known good data.
-- Stale data is visibly marked per service.
-- All service API polling is cancellable on shutdown.
-- API tokens are not printed to stdout, logs, or error screens.
-- The core panel row-building logic can be tested without a terminal.
-
-## Open Product Questions
-
-- Which Plex account/user naming convention should be displayed when multiple names are available?
-- Should local and remote Plex streams be grouped or only tagged by location?
-- Which queue states from Sonarr/Radarr/SABnzbd deserve warning colors?
-- Should Overseerr approved-but-not-fulfilled requests appear in `Pending Requests` or a future separate panel?
+54. **Open question:** Should Overseerr approved-but-not-fulfilled requests appear in `Pending Requests` or in a future separate panel?
